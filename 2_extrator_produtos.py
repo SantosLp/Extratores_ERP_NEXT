@@ -9,7 +9,7 @@ ERPNext_URL = os.getenv("ERPNext_URL")
 API_KEY = os.getenv("ERPNext_API_KEY")
 API_SECRET = os.getenv("ERPNext_API_SECRET")
 
-ONGSYS_URL_BASE = os.getenv("ONGSYS_URL_BASE") + "/produtos"
+ONGSYS_URL_PRODUTOS = os.getenv("ONGSYS_URL_BASE") + "/produtos"
 ONGSYS_USER = os.getenv("ONGSYS_USERNAME")
 ONGSYS_PASS = os.getenv("ONGSYS_PASSWORD")
 
