@@ -84,7 +84,7 @@ def transformar_e_filtrar_produtos(produtos_origem, codigos_existentes):
                     "item_code": novo_codigo_str,
                     "item_name": nome_produto,
                     "item_group": produto.get("grupo", "Produtos"),
-                    "stock_uom": "Unidade", # <<<--- AQUI ESTÁ A CORREÇÃO
+                    "stock_uom": "Unidade",
                     "description": produto.get("descricaoProduto")
                 }
                 
