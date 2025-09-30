@@ -77,7 +77,7 @@ def transformar_e_filtrar_produtos(produtos_origem, codigos_existentes):
             continue
 
         try:
-            novo_codigo_str = str(int(codigo_origem_str) + 10000)
+            novo_codigo_str = str(int(codigo_origem_str))
 
             if novo_codigo_str not in codigos_existentes:
                 produto_formatado = {
