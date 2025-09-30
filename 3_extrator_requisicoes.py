@@ -77,18 +77,18 @@ def transformar_pedidos_para_erpnext(pedidos_origem):
         
         for item_pedido in pedido.get("itensPedido", []):
             try:
-                # Tenta converter a quantidade para float e depois arredonda para o inteiro mais próximo.
-                quantidade_original = item_pedido.get("quantidade", 0)
-                quantidade_arredondada = round(float(quantidade_original))
+                # <<<--- AQUI ESTÁ A CORREÇÃO ---<<<
+                # Convertemos para float, MAS NÃO ARREDONDAMOS. Enviamos o valor real.
+                quantidade = float(item_pedido.get("quantidade", 0))
 
-                if quantidade_arredondada == 0:
-                    erros_encontrados.append({'pedido_id': id_pedido, 'fornecedor': nome_fornecedor, 'motivo': 'Item Ignorado', 'detalhe': f"Item com ID '{item_pedido.get('idProduto')}' ignorado (quantidade é zero ou arredondada para zero)."})
+                if quantidade == 0:
+                    erros_encontrados.append({'pedido_id': id_pedido, 'fornecedor': nome_fornecedor, 'motivo': 'Item Ignorado', 'detalhe': f"Item com ID '{item_pedido.get('idProduto')}' ignorado (quantidade é zero)."})
                     continue
 
                 id_original = int(item_pedido.get("idProduto"))
                 item_code_final = str(id_original)
 
-                item_formatado = { "item_code": item_code_final, "qty": quantidade_arredondada, "rate": 1 }
+                item_formatado = { "item_code": item_code_final, "qty": quantidade, "rate": 1 }
                 nova_requisicao["items"].append(item_formatado)
             except (TypeError, ValueError):
                 erros_encontrados.append({'pedido_id': id_pedido, 'fornecedor': nome_fornecedor, 'motivo': 'Item Ignorado', 'detalhe': f"Item com ID '{item_pedido.get('idProduto')}' não é um número e será ignorado."})
