@@ -127,4 +127,4 @@ if __name__ == "__main__":
         produtos_erpnext = get_produtos_existentes_do_erpnext()
         produtos_novos = transformar_e_filtrar_produtos(produtos_ongsys, produtos_erpnext)
         carregar_novos_produtos(produtos_novos)
-    print("\n====== EXTRATOR DE PRODUTOS FINALIZADO ======")
+    print("\n====== EXTRATOR DE PRODUTOS FINALIZADO ======") 
