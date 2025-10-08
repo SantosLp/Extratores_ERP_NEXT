@@ -2,31 +2,30 @@ import requests
 from requests.auth import HTTPBasicAuth
 import os
 from dotenv import load_dotenv
-from datetime import datetime
-import json
+from typing import List, Dict, Set
 
 # --- CONFIGURAÇÕES ---
 load_dotenv()
 ERPNext_URL = os.getenv("ERPNext_URL")
-ERPNext_API_KEY = os.getenv("ERPNext_API_KEY")
-ERPNext_API_SECRET = os.getenv("ERPNext_API_SECRET")
-ONGSYS_URL_BASE = "https://www.ongsys.com.br/app/index.php/api/v2"
-ONGSYS_USER = "03970166000129"
-ONGSYS_PASS = "fa009965195f9770db49a9111570b531"
+API_KEY = os.getenv("ERPNext_API_KEY")
+API_SECRET = os.getenv("ERPNext_API_SECRET")
 
-if not all([ERPNext_URL, ERPNext_API_KEY, ERPNext_API_SECRET]):
-    print("!!! ERRO CRÍTICO: Verifique as variáveis do ERPNext no arquivo .env !!!")
+ONGSYS_URL_BASE = os.getenv("ONGSYS_URL_BASE")
+ONGSYS_USER = os.getenv("ONGSYS_USERNAME")
+ONGSYS_PASS = os.getenv("ONGSYS_PASSWORD")
+
+if not all([ERPNext_URL, API_KEY, API_SECRET, ONGSYS_URL_BASE, ONGSYS_USER, ONGSYS_PASS]):
+    print("!!! ERRO CRÍTICO: Verifique TODAS as variáveis de ambiente no arquivo .env !!!")
     exit()
 
-HEADERS_ERPNext = {"Authorization": f"token {ERPNext_API_KEY}:{ERPNext_API_SECRET}"}
-AUTH_ONGSYS = HTTPBasicAuth(ONGSYS_USER, ONGSYS_PASS)
+HEADERS_ERPNext = {"Authorization": f"token {API_KEY}:{API_SECRET}"}
+HEADERS_ONGSYS = {'User-Agent': 'Mozilla/5.0'}
 
-erros_encontrados = []
+# --- FUNÇÕES DO EXTRATOR ---
 
-def extrair_pedidos_ongsys():
-    """Extrai todos os pedidos da API do ONGsys, lidando com a paginação."""
-    print("--- ETAPA 1: Extraindo PEDIDOS da API REAL do ONGSYS ---")
-    endpoint = f"{ONGSYS_URL_BASE}/pedidos"
+def extrair_requisicoes_ongsys() -> List[Dict]:
+    print("--- ETAPA 1: Extraindo PEDIDOS da API do ONGSYS ---")
+    endpoint = f"{ONGSYS_URL_BASE.rstrip('/')}/pedidos"
     pagina_atual = 1
     todos_pedidos = []
     
@@ -34,132 +33,108 @@ def extrair_pedidos_ongsys():
         print(f"Buscando dados da página: {pagina_atual}...")
         try:
             params = {'pageNumber': pagina_atual}
-            response = requests.get(endpoint, auth=AUTH_ONGSYS, params=params, timeout=30)
+            response = requests.get(endpoint, auth=HTTPBasicAuth(ONGSYS_USER, ONGSYS_PASS), params=params, headers=HEADERS_ONGSYS, timeout=30)
+            if response.status_code == 422:
+                print("-> Fim dos dados (422 recebido)."); break
             response.raise_for_status()
             dados = response.json()
-            
             pedidos_da_pagina = dados.get('data', [])
             if not pedidos_da_pagina:
-                print("-> Fim dos dados. Página vazia recebida.")
-                break
-            
+                print("-> Fim dos dados. Página vazia recebida."); break
             todos_pedidos.extend(pedidos_da_pagina)
             print(f" -> {len(pedidos_da_pagina)} registros encontrados nesta página.")
             pagina_atual += 1
         except Exception as e:
-            print(f"!!! FALHA na extração na página {pagina_atual}: {e}")
-            break
+            print(f"!!! FALHA na extração na página {pagina_atual}: {e}"); break
             
     print(f"\n-> Extração do ONGSYS concluída. Total de {len(todos_pedidos)} pedidos encontrados.")
     return todos_pedidos
 
-def transformar_pedidos_para_erpnext(pedidos_origem):
-    """Converte a estrutura de Pedido do ONGsys para Nota de Recebimento do ERPNext."""
-    print("--- ETAPA 2: Transformando PEDIDOS para o formato do ERPNext ---")
-    requisicoes_finais = []
+def get_requisicoes_existentes_erpnext() -> Set[str]:
+    print("--- ETAPA 2: Verificando requisições já existentes no ERPNext ---")
+    ids_existentes = set()
+    try:
+        url = f"{ERPNext_URL}/api/resource/Purchase Invoice?fields=[\"custom_id_ongsys\"]&limit=9999"
+        response = requests.get(url, headers=HEADERS_ERPNext, timeout=30)
+        response.raise_for_status()
+        dados = response.json()
+        ids_existentes = {str(req['custom_id_ongsys']) for req in dados.get('data', []) if req.get('custom_id_ongsys')}
+        print(f"-> {len(ids_existentes)} requisições do ONGSYS encontradas no ERPNext.")
+    except Exception as e:
+        print(f"!!! AVISO: Não foi possível buscar requisições existentes. Pode haver duplicatas. Erro: {e}")
+    return ids_existentes
+
+def transformar_requisicoes_para_erpnext(pedidos_origem: List[Dict], ids_existentes: Set[str]) -> List[Dict]:
+    print("--- ETAPA 3: Transformando PEDIDOS para o formato de FATURA DE COMPRA ---")
+    faturas_finais = []
     for pedido in pedidos_origem:
-        id_pedido = pedido.get('idPedido')
-        fornecedor_info = pedido.get('fornecedor', {})
-        nome_fornecedor = fornecedor_info.get("nome")
-        
-        if not fornecedor_info or not nome_fornecedor:
-            erros_encontrados.append({'pedido_id': id_pedido, 'fornecedor': 'N/A', 'motivo': 'Dados Inválidos', 'detalhe': 'Pedido ignorado por não ter um fornecedor válido.'})
+        id_pedido_str = str(pedido.get("idPedido"))
+
+        if id_pedido_str in ids_existentes:
             continue
 
-        nova_requisicao = {
-            "doctype": "Purchase Receipt",
-            "supplier": nome_fornecedor,
+        fornecedor_info = pedido.get('fornecedor', {})
+        
+        # <<<--- CORREÇÃO APLICADA AQUI: Pegar a conta de despesa ---<<<
+        conta_financeira_completa = pedido.get("contaPlanoFinanceiro", "")
+        # Pega a parte depois do ' - ', se existir. Se não, usa um valor padrão.
+        conta_de_despesa = conta_financeira_completa.split(' - ')[-1] if ' - ' in conta_financeira_completa else "Despesas Diversas"
+
+        nova_fatura = {
+            "doctype": "Purchase Invoice",
+            "supplier": fornecedor_info.get("nome"),
             "posting_date": pedido.get("dataPedido"),
-            "docstatus": 0,
-            "items": [],
-            "_id_original": id_pedido
+            "due_date": pedido.get("dataPedido"),
+            "docstatus": 1,
+            "custom_id_ongsys": id_pedido_str,
+            "items": []
         }
-        
+
         for item_pedido in pedido.get("itensPedido", []):
-            try:
-                # --- CORREÇÃO APLICADA AQUI ---
-                # 1. Tenta converter a quantidade para float para aceitar valores "quebrados".
-                # 2. NÃO ignora mais a quantidade se for zero.
-                quantidade = float(item_pedido.get("quantidade", 0))
-                id_original = int(item_pedido.get("idProduto"))
-                item_code_final = str(id_original + 10000)
-
-                item_formatado = { "item_code": item_code_final, "qty": quantidade, "rate": 1 }
-                nova_requisicao["items"].append(item_formatado)
-
-            except (TypeError, ValueError):
-                # Mantém a validação para ignorar apenas itens que não têm um ID numérico.
-                erros_encontrados.append({'pedido_id': id_pedido, 'fornecedor': nome_fornecedor, 'motivo': 'Item Ignorado', 'detalhe': f"Item com ID '{item_pedido.get('idProduto')}' não é um número e será ignorado."})
+            nome_servico = item_pedido.get("nomeServico")
+            if not nome_servico:
                 continue
-        
-        if nova_requisicao["items"]:
-            requisicoes_finais.append(nova_requisicao)
-        else:
-            erros_encontrados.append({'pedido_id': id_pedido, 'fornecedor': nome_fornecedor, 'motivo': 'Pedido Ignorado', 'detalhe': 'Pedido ignorado por não conter itens válidos após a limpeza.'})
 
-    print(f"-> {len(requisicoes_finais)} requisições prontas para serem enviadas.")
-    return requisicoes_finais
+            item_formatado = {
+                "item_name": nome_servico,
+                "description": item_pedido.get("descricao") or nome_servico,
+                "qty": item_pedido.get("quantidade", 1),
+                "rate": item_pedido.get("valorUnitario", 1), # Usando o valor unitário se existir, senão 1
+                "expense_account": conta_de_despesa # Adiciona a conta de despesa em cada item
+            }
+            nova_fatura["items"].append(item_formatado)
 
-def carregar_requisicoes_erpnext(lista_de_requisicoes):
-    """Envia as Notas de Recebimento formatadas para a API do ERPNext."""
-    if not lista_de_requisicoes:
-        print("--- ETAPA 3: Nenhuma requisição nova para carregar. ---")
+        if nova_fatura["items"]:
+            faturas_finais.append(nova_fatura)
+    
+    print(f"-> {len(faturas_finais)} novas faturas prontas para serem enviadas.")
+    return faturas_finais
+
+def carregar_requisicoes_erpnext(lista_de_faturas: List[Dict]):
+    if not lista_de_faturas:
+        print("--- ETAPA 4: Nenhuma fatura nova para carregar. ---")
         return
         
-    print(f"--- ETAPA 3: Carregando {len(lista_de_requisicoes)} REQUISIÇÕES no ERPNext ---")
-    url = f"{ERPNext_URL}/api/resource/Purchase Receipt"
+    print(f"--- ETAPA 4: Carregando {len(lista_de_faturas)} FATURAS DE COMPRA no ERPNext ---")
+    url = f"{ERPNext_URL}/api/resource/Purchase Invoice"
 
-    for requisicao in lista_de_requisicoes:
-        fornecedor = requisicao.get("supplier")
-        id_original = requisicao.pop("_id_original", "N/A")
-
-        print(f"Enviando Requisição (Pedido Original ID: {id_original}) do fornecedor '{fornecedor}'...")
+    for fatura in lista_de_faturas:
+        id_original = fatura.get("custom_id_ongsys")
+        print(f"Enviando Fatura (ID ONGsys: {id_original})...")
         try:
-            response = requests.post(url, headers=HEADERS_ERPNext, json=requisicao, timeout=60)
+            response = requests.post(url, headers=HEADERS_ERPNext, json=fatura, timeout=60)
             response.raise_for_status()
             print(f" -> SUCESSO!")
         except Exception as e:
-            print(f" -> FALHA!")
-            resposta_servidor = str(e)
-            if hasattr(e, 'response'): 
-                resposta_servidor = e.response.text
-            erros_encontrados.append({'pedido_id': id_original, 'fornecedor': fornecedor, 'motivo': 'Falha no Carregamento (API)', 'detalhe': resposta_servidor})
-
-def salvar_log_de_erros(lista_de_erros):
-    """Salva um relatório de todos os erros encontrados em um arquivo na Área de Trabalho."""
-    if not lista_de_erros:
-        print("\nNenhum erro documentado. Execução limpa!")
-        return
-
-    caminho_desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    nome_arquivo = f"log_erros_requisicoes_{timestamp}.txt"
-    caminho_completo = os.path.join(caminho_desktop, nome_arquivo)
-
-    print(f"\nDocumentando {len(lista_de_erros)} erros no arquivo: {nome_arquivo}")
-
-    with open(caminho_completo, 'w', encoding='utf-8') as f:
-        f.write(f"Relatório de Erros - Execução de {timestamp}\n")
-        f.write("="*50 + "\n\n")
-        for i, erro in enumerate(lista_de_erros):
-            f.write(f"--- Erro #{i+1} ---\n")
-            f.write(f"Pedido Original ID: {erro.get('pedido_id', 'N/A')}\n")
-            f.write(f"Fornecedor: {erro.get('fornecedor', 'N/A')}\n")
-            f.write(f"Motivo: {erro.get('motivo')}\n")
-            f.write(f"Detalhe: {erro.get('detalhe')}\n")
-            f.write("-" * 20 + "\n\n")
-    
-    print(f"SUCESSO! Arquivo de log de erros foi salvo na sua Área de Trabalho.")
+            print(f" -> FALHA: {e}")
+            if hasattr(e, 'response'): print(f" -> Resposta do Servidor: {e.response.text}")
 
 # --- EXECUÇÃO PRINCIPAL ---
 if __name__ == "__main__":
-    print(f"\n====== INICIANDO EXTRATOR DE REQUISIÇÕES (VIDA REAL) ======")
-    pedidos_ongsys = extrair_pedidos_ongsys()
+    print(f"\n====== INICIANDO EXTRATOR DE REQUISIÇÕES ======")
+    pedidos_ongsys = extrair_requisicoes_ongsys()
     if pedidos_ongsys:
-        requisicoes_para_erpnext = transformar_pedidos_para_erpnext(pedidos_ongsys)
-        carregar_requisicoes_erpnext(requisicoes_para_erpnext)
-    
-    salvar_log_de_erros(erros_encontrados)
-    
+        ids_ja_importados = get_requisicoes_existentes_erpnext()
+        faturas_para_erpnext = transformar_requisicoes_para_erpnext(pedidos_ongsys, ids_ja_importados)
+        carregar_requisicoes_erpnext(faturas_para_erpnext)
     print("\n====== EXTRATOR DE REQUISIÇÕES FINALIZADO ======")
-
