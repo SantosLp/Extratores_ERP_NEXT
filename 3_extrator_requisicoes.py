@@ -14,8 +14,10 @@ ONGSYS_URL_BASE = os.getenv("ONGSYS_URL_BASE")
 ONGSYS_USER = os.getenv("ONGSYS_USERNAME")
 ONGSYS_PASS = os.getenv("ONGSYS_PASSWORD")
 
-if not all([ERPNext_URL, API_KEY, API_SECRET, ONGSYS_URL_BASE, ONGSYS_USER, ONGSYS_PASS]):
-    print("!!! ERRO CRÍTICO: Verifique TODAS as variáveis de ambiente no arquivo .env !!!")
+WAREHOUSE_ALVO = os.getenv("ERPNext_WAREHOUSE") 
+
+if not all([ERPNext_URL, API_KEY, API_SECRET, ONGSYS_URL_BASE, ONGSYS_USER, ONGSYS_PASS, WAREHOUSE_ALVO]):
+    print("!!! ERRO CRÍTICO: Verifique TODAS as variáveis de ambiente no arquivo .env (incluindo ERPNext_WAREHOUSE) !!!")
     exit()
 
 HEADERS_ERPNext = {"Authorization": f"token {API_KEY}:{API_SECRET}"}
@@ -41,100 +43,108 @@ def extrair_requisicoes_ongsys() -> List[Dict]:
             pedidos_da_pagina = dados.get('data', [])
             if not pedidos_da_pagina:
                 print("-> Fim dos dados. Página vazia recebida."); break
-            todos_pedidos.extend(pedidos_da_pagina)
-            print(f" -> {len(pedidos_da_pagina)} registros encontrados nesta página.")
+            
+            pedidos_de_produto = [p for p in pedidos_da_pagina if p.get("tipoPedido") == "Produto"]
+            todos_pedidos.extend(pedidos_de_produto)
+            
+            print(f" -> {len(pedidos_da_pagina)} registros encontrados, {len(pedidos_de_produto)} são de produtos.")
             pagina_atual += 1
         except Exception as e:
             print(f"!!! FALHA na extração na página {pagina_atual}: {e}"); break
             
-    print(f"\n-> Extração do ONGSYS concluída. Total de {len(todos_pedidos)} pedidos encontrados.")
+    print(f"\n-> Extração do ONGSYS concluída. Total de {len(todos_pedidos)} pedidos de PRODUTO encontrados.")
     return todos_pedidos
 
-def get_requisicoes_existentes_erpnext() -> Set[str]:
-    print("--- ETAPA 2: Verificando requisições já existentes no ERPNext ---")
+def get_lancamentos_existentes_erpnext() -> Set[str]:
+    print("--- ETAPA 2: Verificando Lançamentos de Estoque já existentes no ERPNext ---")
     ids_existentes = set()
     try:
-        url = f"{ERPNext_URL}/api/resource/Purchase Invoice?fields=[\"custom_id_ongsys\"]&limit=9999"
-        response = requests.get(url, headers=HEADERS_ERPNext, timeout=30)
+        url = f"{ERPNext_URL}/api/resource/Stock Entry?fields=[\"custom_id_ongsys\"]&limit=9999"
+        response = requests.get(url, headers=HEADERS_ERPNext, timeout=120)
         response.raise_for_status()
         dados = response.json()
         ids_existentes = {str(req['custom_id_ongsys']) for req in dados.get('data', []) if req.get('custom_id_ongsys')}
-        print(f"-> {len(ids_existentes)} requisições do ONGSYS encontradas no ERPNext.")
+        print(f"-> {len(ids_existentes)} lançamentos do ONGSYS encontrados no ERPNext.")
     except Exception as e:
-        print(f"!!! AVISO: Não foi possível buscar requisições existentes. Pode haver duplicatas. Erro: {e}")
+        print(f"!!! AVISO: Não foi possível buscar lançamentos existentes. Pode haver duplicatas. Erro: {e}")
     return ids_existentes
 
 def transformar_requisicoes_para_erpnext(pedidos_origem: List[Dict], ids_existentes: Set[str]) -> List[Dict]:
-    print("--- ETAPA 3: Transformando PEDIDOS para o formato de FATURA DE COMPRA ---")
-    faturas_finais = []
+    print("--- ETAPA 3: Transformando PEDIDOS para o formato de LANÇAMENTO DE ESTOQUE ---")
+    lancamentos_finais = []
     for pedido in pedidos_origem:
         id_pedido_str = str(pedido.get("idPedido"))
 
         if id_pedido_str in ids_existentes:
             continue
-
-        fornecedor_info = pedido.get('fornecedor', {})
         
-        # <<<--- CORREÇÃO APLICADA AQUI: Pegar a conta de despesa ---<<<
-        conta_financeira_completa = pedido.get("contaPlanoFinanceiro", "")
-        # Pega a parte depois do ' - ', se existir. Se não, usa um valor padrão.
-        conta_de_despesa = conta_financeira_completa.split(' - ')[-1] if ' - ' in conta_financeira_completa else "Despesas Diversas"
-
-        nova_fatura = {
-            "doctype": "Purchase Invoice",
-            "supplier": fornecedor_info.get("nome"),
+        novo_lancamento = {
+            "doctype": "Stock Entry",
+            "stock_entry_type": "Material Receipt",
             "posting_date": pedido.get("dataPedido"),
-            "due_date": pedido.get("dataPedido"),
             "docstatus": 1,
             "custom_id_ongsys": id_pedido_str,
             "items": []
         }
 
         for item_pedido in pedido.get("itensPedido", []):
-            nome_servico = item_pedido.get("nomeServico")
-            if not nome_servico:
+            try:
+                # <<<--- AJUSTE FINAL DE ROBUSTEZ ---<<<
+                # Tenta converter a quantidade para número e verifica se é maior que zero
+                quantidade = float(item_pedido.get("quantidade", 0))
+                if quantidade <= 0:
+                    print(f" -> AVISO: Item '{item_pedido.get('idProduto')}' no pedido '{id_pedido_str}' tem quantidade zero ou inválida e será ignorado.")
+                    continue
+
+                id_original = int(item_pedido.get("idProduto"))
+                item_code_final = str(id_original)
+
+                item_formatado = {
+                    "item_code": item_code_final,
+                    "qty": quantidade, # Usa a quantidade validada
+                    "rate": 1,
+                    "t_warehouse": WAREHOUSE_ALVO
+                }
+                novo_lancamento["items"].append(item_formatado)
+            except (TypeError, ValueError, AttributeError):
+                print(f" -> AVISO: Item com dados inválidos no pedido '{id_pedido_str}' será ignorado. Dados: {item_pedido}")
                 continue
-
-            item_formatado = {
-                "item_name": nome_servico,
-                "description": item_pedido.get("descricao") or nome_servico,
-                "qty": item_pedido.get("quantidade", 1),
-                "rate": item_pedido.get("valorUnitario", 1), # Usando o valor unitário se existir, senão 1
-                "expense_account": conta_de_despesa # Adiciona a conta de despesa em cada item
-            }
-            nova_fatura["items"].append(item_formatado)
-
-        if nova_fatura["items"]:
-            faturas_finais.append(nova_fatura)
+        
+        if novo_lancamento["items"]:
+            lancamentos_finais.append(novo_lancamento)
     
-    print(f"-> {len(faturas_finais)} novas faturas prontas para serem enviadas.")
-    return faturas_finais
+    print(f"-> {len(lancamentos_finais)} novos Lançamentos de Estoque prontos para serem enviados.")
+    return lancamentos_finais
 
-def carregar_requisicoes_erpnext(lista_de_faturas: List[Dict]):
-    if not lista_de_faturas:
-        print("--- ETAPA 4: Nenhuma fatura nova para carregar. ---")
+def carregar_lancamentos_erpnext(lista_de_lancamentos: List[Dict]):
+    if not lista_de_lancamentos:
+        print("--- ETAPA 4: Nenhum Lançamento de Estoque para carregar. ---")
         return
         
-    print(f"--- ETAPA 4: Carregando {len(lista_de_faturas)} FATURAS DE COMPRA no ERPNext ---")
-    url = f"{ERPNext_URL}/api/resource/Purchase Invoice"
+    print(f"--- ETAPA 4: Carregando {len(lista_de_lancamentos)} LANÇAMENTOS DE ESTOQUE no ERPNext ---")
+    url = f"{ERPNext_URL}/api/resource/Stock Entry"
 
-    for fatura in lista_de_faturas:
-        id_original = fatura.get("custom_id_ongsys")
-        print(f"Enviando Fatura (ID ONGsys: {id_original})...")
+    for lancamento in lista_de_lancamentos:
+        id_original = lancamento.get("custom_id_ongsys")
+        print(f"Enviando Lançamento (ID ONGsys: {id_original})...")
         try:
-            response = requests.post(url, headers=HEADERS_ERPNext, json=fatura, timeout=60)
+            response = requests.post(url, headers=HEADERS_ERPNext, json=lancamento, timeout=120)
             response.raise_for_status()
             print(f" -> SUCESSO!")
+        except requests.exceptions.HTTPError as e:
+            print(f" -> FALHA DE API: {e}")
+            print(f" -> Resposta do Servidor: {e.response.text}")
+        except requests.exceptions.RequestException as e:
+            print(f" -> FALHA DE CONEXÃO: {e}")
         except Exception as e:
-            print(f" -> FALHA: {e}")
-            if hasattr(e, 'response'): print(f" -> Resposta do Servidor: {e.response.text}")
+             print(f" -> ERRO INESPERADO: {e}")
 
 # --- EXECUÇÃO PRINCIPAL ---
 if __name__ == "__main__":
     print(f"\n====== INICIANDO EXTRATOR DE REQUISIÇÕES ======")
     pedidos_ongsys = extrair_requisicoes_ongsys()
     if pedidos_ongsys:
-        ids_ja_importados = get_requisicoes_existentes_erpnext()
-        faturas_para_erpnext = transformar_requisicoes_para_erpnext(pedidos_ongsys, ids_ja_importados)
-        carregar_requisicoes_erpnext(faturas_para_erpnext)
+        ids_ja_importados = get_lancamentos_existentes_erpnext()
+        lancamentos_para_erpnext = transformar_requisicoes_para_erpnext(pedidos_ongsys, ids_ja_importados)
+        carregar_lancamentos_erpnext(lancamentos_para_erpnext)
     print("\n====== EXTRATOR DE REQUISIÇÕES FINALIZADO ======")
