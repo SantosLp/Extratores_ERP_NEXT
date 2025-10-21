@@ -1,0 +1,59 @@
+### Variables 
+@apiurlNext =  http://34.61.7.176:8080
+@tokenERPNEXT = 618a6a4b1fcccb0:3d731e7e34b3fbb
+@apiongsys = https://www.ongsys.com.br/app/index.php/api/v2
+
+@tokenongsys = 03970166000129:fa009965195f9770db49a9111570b531
+
+@ONGSYS_USER = 03970166000129
+@ONGSYS_PASS = fa009965195f9770db49a9111570b531
+
+### 🔐 Login no ERPNext (gera o cookie "sid")
+### GET - Buscar Stock Entry específico
+GET {{apiurlNext}}/api/resource/Stock%20Entry/MAT-STE-2025-00020?fields=%5B%22*%22%5D
+Authorization: token {{tokenERPNEXT}}
+Accept: application/json
+Content-Type: application/json
+
+
+##  pegue todos os pedidos ongys 
+### GET - Buscar todos os pedidos na Ongsys
+GET {{apiongsys}}/pedidos?pageNumber=1
+Authorization: Basic MDM5NzAxNjYwMDAxMjk6ZmEwMDk5NjUxOTVmOTc3MGRiNDlhOTExMTU3MGI1MzE=
+Accept: application/json
+Content-Type: application/json
+
+
+##0 criando idpedido
+### POST - Criar campo personalizado "idpedido" em Stock Entry no ERPNext
+POST http://34.61.7.176:8080/api/resource/Custom%20Field
+Authorization: token {{tokenERPNEXT}}
+Content-Type: application/json
+
+{
+  "dt": "Stock Entry",
+  "label": "idpedido",
+  "fieldname": "idpedido",
+  "fieldtype": "Text",
+  "insert_after": "stock_entry_type"
+}
+
+
+### PUT - Atualizar Stock Entry com o campo personalizado "idpedido"
+GET http://34.61.7.176:8080/api/resource/Custom%20Field?filters=[["dt","=","Stock Entry"]]&fields=["name","label","fieldname","fieldtype"]
+Authorization: token {{tokenERPNEXT}}
+Accept: application/json
+
+
+### teste 
+POST {{apiurlNext}}/api/method/frappe.client.get_list
+Authorization: token {{tokenERPNEXT}}
+Accept: application/json
+Content-Type: application/json
+
+{
+  "doctype": "Stock Entry Detail",
+  "filters": { "parent": "MAT-STE-2025-00020" },
+  "fields": ["*"],
+  "limit_page_length": 1000
+}
